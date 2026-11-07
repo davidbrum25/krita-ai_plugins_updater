@@ -17,7 +17,10 @@ Escrito en Python 3 utilizando únicamente la librería estándar (sin dependenc
 
 ## Características
 
-- 🔍 **Comprobación inteligente de versiones**: Consulta la API oficial de GitHub Releases y compara con la versión instalada localmente (mediante archivo manifest `.plugins_installed_manifest.json` o inspección de `__init__.py`).
+- 🔍 **Detección inteligente de versión de Krita (Krita 5 / Qt5 vs Krita 6 / Qt6)**:
+  - Detecta automáticamente qué versión de Krita tienes instalada (`krita --version`).
+  - Si tienes **Krita 6.x** (ej. `6.0.4`), selecciona automáticamente las versiones compiladas para Qt6 (`v1.54.0-pre`+ en *AI Diffusion* y `v3.0.0-pre`+ en *Vision Tools*), evitando hacer *downgrade* accidental a los releases de Krita 5 (`v1.53.0` / `v2.2.0`).
+  - Incluye corrección automática para el bug [Acly/krita-ai-diffusion#2648](https://github.com/Acly/krita-ai-diffusion/issues/2648), evitando que `v1.54.0-pre` muestre un falso aviso de actualización hacia `1.53.0` dentro del panel de Krita.
 - 📦 **Sin dependencias externas**: Funciona con cualquier instalación estándar de Python 3 (`urllib`, `zipfile`, `pathlib`, etc.).
 - 🚀 **Integración con KDE Plasma**: Incluye instalador (`install.sh`) y lanzador `.desktop` (**Update Krita AI Tools**) con icono nativo de Krita, notificaciones de escritorio (`notify-send`) y ejecución en `konsole`.
 - 🛡️ **Actualización segura con respaldo**:

@@ -168,6 +168,69 @@ def save_manifest(pykrita_dir: Path, manifest: dict):
         print(f"[-] No se pudo guardar el manifest: {e}")
 
 
+def parse_version_tuple(ver_str: str) -> tuple:
+    """Convierte una cadena de versión (ej. 'v1.54.0-pre') en una tupla numérica (1, 54, 0)."""
+    nums = re.findall(r"\d+", ver_str or "")
+    return tuple(int(n) for n in nums) if nums else (0,)
+
+
+def detect_krita_version():
+    """Detecta la versión instalada de Krita (ej. ('6.0.4', 6))."""
+    krita_bin = shutil.which("krita")
+    if not krita_bin and detect_os() == "windows":
+        for p in [
+            Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Krita (x64)" / "bin" / "krita.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Krita (x64)" / "bin" / "krita.exe",
+        ]:
+            if p.exists():
+                krita_bin = str(p)
+                break
+
+    if krita_bin:
+        try:
+            res = subprocess.run(
+                [krita_bin, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            output = (res.stdout or "") + "\n" + (res.stderr or "")
+            match = re.search(r"krita\s+(\d+)\.(\d+)(?:\.(\d+))?", output, re.IGNORECASE)
+            if match:
+                full_ver = match.group(0).split()[-1]
+                major = int(match.group(1))
+                return full_ver, major
+        except Exception:
+            pass
+    return None, None
+
+
+def is_release_compatible_with_krita(plugin_id: str, release: dict, krita_major: int | None) -> bool:
+    """Verifica si un release de GitHub es compatible con la versión principal de Krita (5 vs 6)."""
+    if krita_major is None:
+        return True
+
+    tag = release.get("tag_name", "")
+    ver_tuple = parse_version_tuple(tag)
+
+    if plugin_id == "ai_diffusion":
+        # En Acly/krita-ai-diffusion: >= 1.54.0 es exclusivo para Krita 6 (Qt6); <= 1.53.x es para Krita 5 (Qt5)
+        if krita_major >= 6:
+            return ver_tuple >= (1, 54)
+        else:
+            return ver_tuple < (1, 54)
+
+    if plugin_id == "vision_tools":
+        # En Acly/krita-vision-tools: >= 3.0.0 es exclusivo para Krita 6 (Qt6); < 3.0.0 es para Krita 5 (Qt5)
+        if krita_major >= 6:
+            return ver_tuple >= (3, 0)
+        else:
+            return ver_tuple < (3, 0)
+
+    return True
+
+
 def get_current_installed_version(pykrita_dir: Path, plugin_id: str, manifest: dict):
     """Obtiene la versión instalada actualmente (desde manifest o inspección local)."""
     if plugin_id in manifest and "version" in manifest[plugin_id]:
@@ -194,7 +257,14 @@ def get_current_installed_version(pykrita_dir: Path, plugin_id: str, manifest: d
     return None
 
 
-def fetch_release_info(repo: str, os_name: str, asset_filter, include_pre: bool = False):
+def fetch_release_info(
+    plugin_id: str,
+    repo: str,
+    os_name: str,
+    asset_filter,
+    include_pre: bool = False,
+    krita_major: int | None = None,
+):
     """Consulta la API de GitHub para encontrar el release compatible más reciente."""
     url = f"https://api.github.com/repos/{repo}/releases"
     headers = {"User-Agent": "Krita-Plugin-AutoUpdater"}
@@ -210,6 +280,8 @@ def fetch_release_info(repo: str, os_name: str, asset_filter, include_pre: bool 
     def search_in_releases(allow_pre):
         for release in releases:
             if not allow_pre and release.get("prerelease", False):
+                continue
+            if not is_release_compatible_with_krita(plugin_id, release, krita_major):
                 continue
             tag_name = release.get("tag_name")
             for asset in release.get("assets", []):
@@ -231,6 +303,7 @@ def fetch_release_info(repo: str, os_name: str, asset_filter, include_pre: bool 
 
     result = search_in_releases(allow_pre=include_pre)
     if not result and not include_pre:
+        # Si no hay release estable compatible (ej. Krita 6 requiere v1.54.0-pre / v3.0.0-pre), buscar en pre-releases
         result = search_in_releases(allow_pre=True)
 
     return result
@@ -322,6 +395,25 @@ def safe_extract_zip(zf: zipfile.ZipFile, dest_dir: Path):
     zf.extractall(resolved_dest)
 
 
+def patch_ai_diffusion_updates(target_folder: Path):
+    """Corrige el falso aviso de actualización en v1.54.0-pre cuando la API devuelve v1.53.0 (Issue #2648)."""
+    updates_file = target_folder / "model" / "updates.py"
+    if not updates_file.exists():
+        return
+    try:
+        content = updates_file.read_text(encoding="utf-8")
+        old_line = "elif self.latest_version == self.current_version:"
+        new_line = (
+            "elif tuple(int(x) for x in self.latest_version.split('.') if x.isdigit())"
+            " <= tuple(int(x) for x in self.current_version.split('.') if x.isdigit()):"
+        )
+        if old_line in content:
+            content = content.replace(old_line, new_line)
+            updates_file.write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+
+
 def install_plugin(pykrita_dir: Path, plugin_id: str, zip_path: Path):
     """Extrae el archivo zip del plugin en pykrita de forma segura."""
     cfg = REPOS[plugin_id]
@@ -350,6 +442,9 @@ def install_plugin(pykrita_dir: Path, plugin_id: str, zip_path: Path):
 
         with zipfile.ZipFile(zip_path, "r") as zf:
             safe_extract_zip(zf, pykrita_dir)
+
+        if plugin_id == "ai_diffusion":
+            patch_ai_diffusion_updates(target_folder)
 
         if temp_models_cache and saved_models:
             restore_custom_models(target_folder, temp_models_cache, saved_models)
@@ -465,6 +560,13 @@ def main():
     os_name = detect_os()
     print(f"[*] Sistema operativo detectado: {os_name.capitalize()} ({platform.machine()})")
 
+    krita_ver_str, krita_major = detect_krita_version()
+    if krita_ver_str:
+        qt_label = "Qt6" if (krita_major and krita_major >= 6) else "Qt5"
+        print(f"[*] Versión de Krita detectada:  {krita_ver_str} (rama Krita {krita_major}.x / {qt_label})")
+    else:
+        print("[*] Versión de Krita detectada:  No detectada en PATH (se usará filtro general)")
+
     if args.pykrita_dir:
         pykrita_dir = Path(args.pykrita_dir).resolve()
     else:
@@ -493,8 +595,15 @@ def main():
         installed_ver = get_current_installed_version(pykrita_dir, plugin_id, manifest)
         print(f"    - Versión instalada actualmente: {installed_ver or 'No instalado'}")
 
-        print("    - Consultando último release...")
-        latest_info = fetch_release_info(cfg["repo"], os_name, cfg["asset_filter"], include_pre=args.include_pre)
+        print("    - Consultando último release compatible...")
+        latest_info = fetch_release_info(
+            plugin_id,
+            cfg["repo"],
+            os_name,
+            cfg["asset_filter"],
+            include_pre=args.include_pre,
+            krita_major=krita_major,
+        )
 
         if not latest_info:
             print(f"    [-] No se encontró un paquete compatible para tu sistema ({os_name}).")
