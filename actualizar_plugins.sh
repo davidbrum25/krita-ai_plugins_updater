@@ -66,6 +66,34 @@ def detect_os():
     return sys_name
 
 
+def notify_desktop(title: str, message: str, urgency: str = "normal"):
+    """Envía una notificación nativa de escritorio en Linux (notify-send)."""
+    if detect_os() == "linux" and shutil.which("notify-send"):
+        try:
+            subprocess.run(
+                ["notify-send", "-u", urgency, "-i", "krita", title, message],
+                check=False,
+            )
+        except Exception:
+            pass
+
+
+def get_default_comfyui_path():
+    """Detecta automáticamente la instalación local de ComfyUI si existe."""
+    env_dir = os.environ.get("COMFYUI_DIR")
+    if env_dir and Path(env_dir).exists():
+        return Path(env_dir)
+    candidates = [
+        Path.home() / "FastDrive" / "ComfyUI-01",
+        Path.home() / "FastDrive" / "ComfyUI",
+        Path.home() / "ComfyUI",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def get_default_pykrita_path():
     """Obtiene la ruta estándar de la carpeta pykrita de Krita según el SO."""
     os_name = detect_os()
@@ -420,6 +448,16 @@ def main():
         default=None,
         help="Ruta opcional a la carpeta de ComfyUI para actualizar su core y nodos mediante git.",
     )
+    parser.add_argument(
+        "--no-comfyui",
+        action="store_true",
+        help="Omite la actualización automática de ComfyUI aunque se detecte en el sistema.",
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Modo gráfico (KDE Launcher): muestra notificaciones nativas y pausa al finalizar.",
+    )
     args = parser.parse_args()
 
     print_banner()
@@ -484,11 +522,16 @@ def main():
             updates_to_apply.append((plugin_id, cfg, latest_info))
 
     if args.check:
+        if updates_to_apply:
+            names = ", ".join(f"{cfg['name']} ({info['tag_name']})" for _, cfg, info in updates_to_apply)
+            notify_desktop("Update Krita AI Tools", f"Actualizaciones disponibles: {names}")
         print("\n[*] Modo solo comprobación (--check) finalizado.")
         return
 
     if not updates_to_apply:
         print("\n[✓] ¡Todos los plugins están al día! No se requieren actualizaciones.")
+        if args.gui:
+            notify_desktop("Krita AI Tools al día", "Todos los plugins están en su versión más reciente.")
     else:
         print("\n" + "=" * 60)
         print(f"  ACTUALIZACIONES PENDIENTES: {len(updates_to_apply)}")
@@ -496,47 +539,63 @@ def main():
         for _, cfg, info in updates_to_apply:
             print(f"  • {cfg['name']}: {info['tag_name']} ({info['asset_name']})")
 
+        proceed_plugins = True
         if not args.yes and sys.stdin.isatty():
             confirm = input("\n¿Deseas descargar e instalar estas actualizaciones ahora? [S/n]: ").strip().lower()
             if confirm not in ["", "s", "si", "y", "yes"]:
-                print("[-] Actualización cancelada por el usuario.")
-                return
+                print("[-] Actualización de plugins cancelada por el usuario.")
+                proceed_plugins = False
 
-        wait_for_krita_closure()
+        if proceed_plugins:
+            wait_for_krita_closure()
 
-        with tempfile.TemporaryDirectory(prefix="krita_plugin_update_") as temp_dir:
-            temp_path = Path(temp_dir)
+            updated_names = []
+            with tempfile.TemporaryDirectory(prefix="krita_plugin_update_") as temp_dir:
+                temp_path = Path(temp_dir)
 
-            for plugin_id, cfg, info in updates_to_apply:
-                print(f"\n[*] Procesando {cfg['name']}...")
-                zip_filename = temp_path / info["asset_name"]
+                for plugin_id, cfg, info in updates_to_apply:
+                    print(f"\n[*] Procesando {cfg['name']}...")
+                    zip_filename = temp_path / info["asset_name"]
 
-                print(f"    Descargando {info['asset_name']}...")
-                try:
-                    download_file_with_progress(info["download_url"], zip_filename)
-                except Exception as e:
-                    print(f"    [-] Error durante la descarga: {e}")
-                    continue
+                    print(f"    Descargando {info['asset_name']}...")
+                    try:
+                        download_file_with_progress(info["download_url"], zip_filename)
+                    except Exception as e:
+                        print(f"    [-] Error durante la descarga: {e}")
+                        continue
 
-                print(f"    Instalando en pykrita...")
-                success = install_plugin(pykrita_dir, plugin_id, zip_filename)
+                    print(f"    Instalando en pykrita...")
+                    success = install_plugin(pykrita_dir, plugin_id, zip_filename)
 
-                if success:
-                    manifest[plugin_id] = {
-                        "version": info["tag_name"],
-                        "asset": info["asset_name"],
-                        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                    save_manifest(pykrita_dir, manifest)
-                    print(f"    [✓] {cfg['name']} instalado/actualizado con éxito a {info['tag_name']}.")
-                else:
-                    print(f"    [-] Hubo un problema al instalar {cfg['name']}.")
+                    if success:
+                        manifest[plugin_id] = {
+                            "version": info["tag_name"],
+                            "asset": info["asset_name"],
+                            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                        save_manifest(pykrita_dir, manifest)
+                        updated_names.append(f"{cfg['name']} {info['tag_name']}")
+                        print(f"    [✓] {cfg['name']} instalado/actualizado con éxito a {info['tag_name']}.")
+                    else:
+                        print(f"    [-] Hubo un problema al instalar {cfg['name']}.")
 
-        print("\n[✓] ¡Proceso de actualización de plugins finalizado!")
-        print("    Recuerda reiniciar o abrir Krita para cargar los nuevos cambios.")
+            if updated_names:
+                notify_desktop("Krita AI Tools Actualizado", "Actualizados: " + ", ".join(updated_names))
 
-    if args.comfyui_dir:
-        update_comfyui_git_repos(Path(args.comfyui_dir).resolve())
+            print("\n[✓] ¡Proceso de actualización de plugins finalizado!")
+            print("    Recuerda reiniciar o abrir Krita para cargar los nuevos cambios.")
+
+    comfy_target = None
+    if not args.no_comfyui:
+        if args.comfyui_dir:
+            comfy_target = Path(args.comfyui_dir).resolve()
+        elif args.gui:
+            default_comfy = get_default_comfyui_path()
+            if default_comfy:
+                comfy_target = default_comfy.resolve()
+
+    if comfy_target:
+        update_comfyui_git_repos(comfy_target)
 
     print("\n============================================================")
     print("                    LISTO PARA USAR                         ")
@@ -548,9 +607,15 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n\n[-] Proceso interrumpido por el usuario.")
-        sys.exit(1)
+        sys.exit(130)
     except Exception as e:
         print(f"\n[-] Error inesperado: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        if "--gui" in sys.argv and sys.stdin.isatty():
+            try:
+                input("\nPresione [Enter] para cerrar esta ventana...")
+            except (EOFError, KeyboardInterrupt):
+                pass

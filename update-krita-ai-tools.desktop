@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Update Krita AI Tools
+GenericName=Actualizador de Krita AI Diffusion, Vision Tools y ComfyUI
+Comment=Comprueba y actualiza los plugins de IA de Krita (AI Diffusion & Vision Tools) y ComfyUI
+Exec=konsole --title "Update Krita AI Tools" -e /home/david/.local/bin/update-krita-ai-tools --gui
+Icon=krita
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;Utility;
+Keywords=krita;ai;diffusion;vision;comfyui;update;actualizar;plugins;
+StartupNotify=true
+StartupWMClass=konsole
