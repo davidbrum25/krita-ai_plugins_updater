@@ -36,7 +36,9 @@ REPOS = {
         "repo": "Acly/krita-vision-tools",
         "folder": "vision_tools",
         "desktop": "vision_tools.desktop",
-        "asset_filter": lambda name, os_name: os_name in name.lower() and name.endswith(".zip"),
+        "asset_filter": lambda name, os_name: (
+            ("macos" if os_name == "darwin" else os_name) in name.lower() and name.endswith(".zip")
+        ),
     },
 }
 
@@ -108,6 +110,9 @@ def wait_for_krita_closure():
     if is_krita_running():
         print("\n[!] AVISO: Krita se encuentra actualmente en ejecución.")
         print("    Para actualizar los plugins de forma segura, cierra Krita primero.")
+        if not sys.stdin.isatty():
+            print("[-] Modo no interactivo detectado con Krita abierto. Abortando por seguridad.")
+            sys.exit(1)
         while is_krita_running():
             input("    Por favor, cierra Krita y presiona [ENTER] para continuar...")
         print("[+] Krita se ha cerrado correctamente. Continuando...\n")
@@ -279,6 +284,16 @@ def restore_custom_models(vision_tools_dir: Path, temp_cache: Path, saved_models
             shutil.copy2(src, dest)
 
 
+def safe_extract_zip(zf: zipfile.ZipFile, dest_dir: Path):
+    """Extrae un archivo ZIP validando que ninguna ruta salga de dest_dir (Zip Slip)."""
+    resolved_dest = dest_dir.resolve()
+    for member in zf.infolist():
+        member_path = (resolved_dest / member.filename).resolve()
+        if resolved_dest not in member_path.parents and member_path != resolved_dest:
+            raise RuntimeError(f"Ruta insegura detectada en el archivo ZIP: {member.filename}")
+    zf.extractall(resolved_dest)
+
+
 def install_plugin(pykrita_dir: Path, plugin_id: str, zip_path: Path):
     """Extrae el archivo zip del plugin en pykrita de forma segura."""
     cfg = REPOS[plugin_id]
@@ -302,12 +317,14 @@ def install_plugin(pykrita_dir: Path, plugin_id: str, zip_path: Path):
         print(f"    [i] Copia de seguridad guardada en: {backup_path.name}")
 
     try:
+        if target_folder.exists():
+            shutil.rmtree(target_folder)
+
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(pykrita_dir)
+            safe_extract_zip(zf, pykrita_dir)
 
         if temp_models_cache and saved_models:
             restore_custom_models(target_folder, temp_models_cache, saved_models)
-            shutil.rmtree(temp_models_cache, ignore_errors=True)
 
         return True
     except Exception as e:
@@ -317,10 +334,13 @@ def install_plugin(pykrita_dir: Path, plugin_id: str, zip_path: Path):
             if target_folder.exists():
                 shutil.rmtree(target_folder, ignore_errors=True)
             shutil.copytree(backup_path, target_folder)
-            backup_desktop = backup_path / desktop_name
+            backup_desktop = target_folder / desktop_name
             if backup_desktop.exists():
-                shutil.copy2(backup_desktop, pykrita_dir / desktop_name)
+                shutil.move(str(backup_desktop), str(pykrita_dir / desktop_name))
         return False
+    finally:
+        if temp_models_cache and temp_models_cache.exists():
+            shutil.rmtree(temp_models_cache, ignore_errors=True)
 
 
 def update_comfyui_git_repos(comfy_root: Path):
@@ -344,8 +364,12 @@ def update_comfyui_git_repos(comfy_root: Path):
                     text=True,
                     check=False,
                 )
-                first_line = res.stdout.strip().split("\n")[0] if res.stdout else "Completado"
-                print(f"     Resultado: {first_line}")
+                if res.returncode == 0:
+                    first_line = res.stdout.strip().split("\n")[0] if res.stdout.strip() else "Completado"
+                    print(f"     Resultado: {first_line}")
+                else:
+                    err_msg = res.stderr.strip().split("\n")[0] if res.stderr.strip() else f"Código {res.returncode}"
+                    print(f"     [!] Error en git pull: {err_msg}")
             except Exception as e:
                 print(f"     Error al ejecutar git pull: {e}")
         else:
